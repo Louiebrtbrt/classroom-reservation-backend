@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 const db = require("../db");
 const {
     nowInManila,
@@ -294,5 +295,133 @@ router.post("/resend-code", (req, res) => {
         });
     });
 });
+/* ---------- Password reset ---------- */
+const resetFailures = new Map(); // email -> { count, resetAt }
+const MAX_RESET_ATTEMPTS = 5;
 
+function tooManyResetAttempts(email) {
+    const entry = resetFailures.get(email);
+    if (!entry) return false;
+    if (Date.now() > entry.resetAt) {
+        resetFailures.delete(email);
+        return false;
+    }
+    return entry.count >= MAX_RESET_ATTEMPTS;
+}
+
+function recordResetFailure(email) {
+    const entry = resetFailures.get(email);
+    if (!entry || Date.now() > entry.resetAt) {
+        resetFailures.set(email, { count: 1, resetAt: Date.now() + 10 * 60 * 1000 });
+    } else {
+        entry.count++;
+    }
+}
+
+router.post("/forgot-password", (req, res) => {
+    const email = String(req.body.email || "").trim();
+    const reply = { message: "If that email is registered, a reset code has been sent." };
+
+    if (!isValidEmail(email)) {
+        return res.status(400).json({ error: "Please enter a valid email address." });
+    }
+
+    const lookupSql = `SELECT id FROM users WHERE username = ? AND email_verified = 1`;
+
+    db.query(lookupSql, [email], (err, rows) => {
+        if (err) {
+            console.error("FORGOT PASSWORD LOOKUP ERROR:", err);
+            return res.status(500).json({ error: "Failed to send reset code." });
+        }
+
+        // Same answer whether or not the account exists, so nobody can check who is registered
+        if (rows.length === 0) {
+            return res.json(reply);
+        }
+
+        const code = String(crypto.randomInt(100000, 1000000));
+        const expires = manilaTimeFromDate(new Date(Date.now() + 10 * 60 * 1000));
+
+        const updateSql = `UPDATE users SET verification_code = ?, verification_code_expires = ? WHERE id = ?`;
+
+        db.query(updateSql, [code, expires, rows[0].id], (err) => {
+            if (err) {
+                console.error("FORGOT PASSWORD UPDATE ERROR:", err);
+                return res.status(500).json({ error: "Failed to send reset code." });
+            }
+
+            sendEmail(
+                email,
+                "Your CRS password reset code",
+                `Your password reset code is ${code}. It expires in 10 minutes. If you didn't ask for this, you can ignore this email.`
+            );
+
+            res.json(reply);
+        });
+    });
+});
+
+router.post("/reset-password", (req, res) => {
+    const email = String(req.body.email || "").trim();
+    const code = String(req.body.code || "").trim();
+    const { newPassword, confirmPassword } = req.body;
+
+    if (!email || !code || !newPassword || !confirmPassword) {
+        return res.status(400).json({ error: "Please fill in all fields." });
+    }
+
+    if (newPassword.length < 8) {
+        return res.status(400).json({ error: "Password must be at least 8 characters." });
+    }
+
+    if (newPassword !== confirmPassword) {
+        return res.status(400).json({ error: "Passwords do not match." });
+    }
+
+    if (tooManyResetAttempts(email)) {
+        return res.status(429).json({ error: "Too many incorrect attempts. Please wait 10 minutes and try again." });
+    }
+
+    const lookupSql = `
+        SELECT id, verification_code, verification_code_expires
+        FROM users
+        WHERE username = ? AND email_verified = 1
+    `;
+
+    db.query(lookupSql, [email], (err, rows) => {
+        if (err) {
+            console.error("RESET PASSWORD LOOKUP ERROR:", err);
+            return res.status(500).json({ error: "Failed to reset password." });
+        }
+
+        const user = rows[0];
+        const valid =
+            user &&
+            user.verification_code &&
+            user.verification_code === code &&
+            user.verification_code_expires &&
+            user.verification_code_expires >= nowInManila();
+
+        if (!valid) {
+            recordResetFailure(email);
+            return res.status(400).json({ error: "That code is incorrect or has expired." });
+        }
+
+        const updateSql = `
+            UPDATE users
+            SET password = ?, verification_code = NULL, verification_code_expires = NULL
+            WHERE id = ?
+        `;
+
+        db.query(updateSql, [newPassword, user.id], (err) => {
+            if (err) {
+                console.error("RESET PASSWORD UPDATE ERROR:", err);
+                return res.status(500).json({ error: "Failed to reset password." });
+            }
+
+            resetFailures.delete(email);
+            res.json({ message: "Password updated. You can now sign in." });
+        });
+    });
+});
 module.exports = router;
