@@ -131,10 +131,22 @@ public class RoomController {
                     roomId, teacherId, currentTime, currentTime);
 
             boolean hasOwnReservation = !ownRows.isEmpty();
+
+            // 2b. Is this teacher the owner of the fixed class in this room right now?
+            List<Map<String, Object>> ownClass = db.rows(
+                    "SELECT end_time FROM fixed_schedules "
+                            + "WHERE room_id = ? AND teacher_id = ? AND day_of_week = ? "
+                            + "AND start_time <= ? AND end_time > ? LIMIT 1",
+                    roomId, teacherId, currentDay, currentTimeOnly, currentTimeOnly);
+            boolean ownsFixedClass = !ownClass.isEmpty();
+
             String sessionEnd;
 
             if (hasOwnReservation) {
                 sessionEnd = String.valueOf(ownRows.get(0).get("end_time"));
+            } else if (ownsFixedClass) {
+                // automatic: stay until the class ends, no need to enter an end time
+                sessionEnd = currentDate + " " + ownClass.get(0).get("end_time");
             } else if (!Helpers.empty(endTimeInput)) {
                 sessionEnd = currentDate + " " + (endTimeInput.length() == 5 ? endTimeInput + ":00" : endTimeInput);
             } else {
@@ -162,7 +174,7 @@ public class RoomController {
             }
 
             // 4. Fixed class schedule (skipped when the teacher confirms with force)
-            if (!force) {
+                       if (!force && !ownsFixedClass) {
                 failMsg = "Failed to check schedule.";
                 List<Map<String, Object>> schedules = db.rows(
                         "SELECT start_time, end_time, label FROM fixed_schedules "

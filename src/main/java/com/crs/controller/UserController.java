@@ -213,6 +213,7 @@ public class UserController {
                 db.update("DELETE FROM follows WHERE student_id = ? OR teacher_id = ?", userId, userId);
                 db.update("DELETE FROM reservations WHERE teacher_id = ?", userId);
                 db.update("UPDATE rooms SET teacher_id = NULL WHERE teacher_id = ?", userId);
+                db.update("UPDATE fixed_schedules SET teacher_id = NULL, label = NULL WHERE teacher_id = ?", userId);
                 int n = db.update("DELETE FROM users WHERE id = ?", userId);
                 if (n == 0) {
                     status.setRollbackOnly();
